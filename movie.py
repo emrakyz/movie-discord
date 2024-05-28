@@ -3,142 +3,129 @@
 import discord
 from discord.ext import commands
 import aiohttp
-from bs4 import BeautifulSoup
-from translate import Translator
+from bs4 import BeautifulSoup as BS
 import json
 import re
 from fuzzywuzzy import process
-from unidecode import unidecode
-from youtubesearchpython import VideosSearch
+from unidecode import unidecode as ud
+from youtubesearchpython import VideosSearch as VS
 import asyncio
 import pandas as pd
 
 tspdt_rankings = pd.read_excel('/home/emre/.local/bin/tspdt_rankings.xlsx')
 
-def normalize_text(text):
-    return unidecode(str(text).lower().replace(' ', '-'))
+def nt(txt):
+    return ud(str(txt).lower().replace(' ', '-'))
 
-def get_rotten_tomatoes_urls(movie_name, year):
-    movie_name_without_spaces = unidecode(str(movie_name).lower().replace('-', '_'))
-    return [f'https://www.rottentomatoes.com/m/{movie_name_without_spaces}',
-            f'https://www.rottentomatoes.com/m/{movie_name_without_spaces}_{year}']
+def grt(m, y):
+    s = ud(str(m).lower().replace('-', '_'))
+    return [f'https://www.rottentomatoes.com/m/{s}', f'https://www.rottentomatoes.com/m/{s}_{y}']
 
-async def fetch_text(url, session):
-    async with session.get(url) as response:
-        return await response.text()
+async def ft(u, s):
+    async with s.get(u) as r:
+        return await r.text()
 
-async def get_rotten_tomatoes_audience_score(movie_name, year, session):
-    movie_name_without_spaces = unidecode(str(movie_name).lower().replace('-', '_'))
-    if normalize_text(movie_name) == 'mirror':
+async def gras(m, y, s):
+    if nt(m) == 'mirror':
         return '91'
+    us = grt(m, y)
 
-    urls = get_rotten_tomatoes_urls(movie_name, year)
+    async def fs(u):
+        t = await ft(u, s)
+        sp = BS(t, 'html.parser')
+        sc = sp.find('script', {'id': 'scoreDetails'})
+        if sc:
+            d = json.loads(sc.string)
+            v = d['scoreboard']['audienceScore'].get('value')
+            if v and v != 0:
+                return str(v).split('/')[0]
 
-    async def fetch_score(url):
-        text = await fetch_text(url, session)
-        soup = BeautifulSoup(text, 'html.parser')
-        script = soup.find('script', {'id': 'scoreDetails'})
-        if script:
-            data = json.loads(script.string)
-            value = data['scoreboard']['audienceScore'].get('value')
-            if value and value != 0:
-                return str(value).split('/')[0]
-        return None
+    ss = await asyncio.gather(*(fs(u) for u in us))
+    return next((score for score in ss if score is not None), "N/A")
 
-    scores = await asyncio.gather(*(fetch_score(url) for url in urls))
-    return next((score for score in scores if score is not None), "N/A")
+async def gtr(m):
+    try:
+        bm = process.extractOne(m, tspdt_rankings['title'])[0]
+        return tspdt_rankings[tspdt_rankings['title'] == bm]['rank'].values[0]
+    except:
+        return "Error"
 
-async def get_tspdt_ranking(movie_name):
-    best_match = process.extractOne(movie_name, tspdt_rankings['title'])[0]
-    rank = tspdt_rankings[tspdt_rankings['title'] == best_match]['rank'].values[0]
-    return rank
-
-async def get_letterboxd_rating(movie_name, year, session):
-    movie_name_with_year = normalize_text(movie_name)
-    movie_name_with_year = movie_name.lower().replace(' ', '-')
-    if year:
-        movie_name_with_year += f'-{year}'
-    url_with_year = f'https://letterboxd.com/film/{movie_name_with_year}/'
-    async with session.get(url_with_year) as response:
-        if response.status != 200:
-            movie_name_without_year = movie_name.lower().replace(' ', '-')
-            url_without_year = f'https://letterboxd.com/film/{movie_name_without_year}/'
-            async with session.get(url_without_year) as response2:
-                text = await response2.text()
-        else:
-            text = await response.text()
-    soup = BeautifulSoup(text, 'html.parser')
-    meta_tag = soup.find('meta', attrs={'name': 'twitter:data2'})
-    if meta_tag:
-        rating_text = meta_tag['content']
-        rating_out_of_5 = float(rating_text.split(' ')[0])
-        return rating_out_of_5 * 2
-    else:
-        return "N/A"
-
-async def get_metacritic_user_score(movie_name, year, session):
-    movie_name_with_dashes = normalize_text(movie_name)
-    url_with_year = f"https://www.metacritic.com/movie/{movie_name_with_dashes}-{year}" if year else None
-    url_without_year = f"https://www.metacritic.com/movie/{movie_name_with_dashes}"
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-        'Referer': 'https://www.metacritic.com'
-    }
-
-    if url_with_year:
-        async with session.get(url_with_year, headers=headers) as response:
-            if response.status == 200:
-                text = await response.text()
+async def glr(m, y, s):
+    try:
+        mn = nt(m)
+        mn = m.lower().replace(' ', '-')
+        if y:
+            mn += f'-{y}'
+        u = f'https://letterboxd.com/film/{mn}/'
+        async with s.get(u) as r:
+            if r.status != 200:
+                mn = m.lower().replace(' ', '-')
+                u = f'https://letterboxd.com/film/{mn}/'
+                async with s.get(u) as r2:
+                    t = await r2.text()
             else:
-                text = None
+                t = await r.text()
+        sp = BS(t, 'html.parser')
+        mt = sp.find('meta', attrs={'name': 'twitter:data2'})
+        if mt:
+            rt = mt['content']
+            ro5 = float(rt.split(' ')[0])
+            return ro5 * 2
+        else:
+            return "N/A"
+    except:
+        return "Error"
 
-    if not text:
-        async with session.get(url_without_year, headers=headers) as response2:
-            text = await response2.text()
-
-    soup = BeautifulSoup(text, 'html.parser')
-    score_span = soup.find('span', class_=lambda x: x and "metascore_w" in x and "user" in x and "larger" in x and "movie" in x)
-    if score_span:
-        score = int(float(score_span.text) * 10)
-        return score
-    else:
+async def gmus(m, y, s):
+    try:
+        mn = nt(m)
+        u = f"https://www.metacritic.com/movie/{mn}"
+        h = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.metacritic.com'}
+        us = [u]
+        if y:
+            us.insert(0, f"{u}-{y}")
+        for u in us:
+            async with s.get(u, headers=h) as r:
+                if r.status == 200:
+                    t = await r.text()
+                    sp = BS(t, 'html.parser')
+                    uss = sp.select_one('div.c-productScoreInfo_scoreNumber div.c-siteReviewScore span')
+                    if uss:
+                        sc = uss.get_text(strip=True)
+                        return sc
+    except:
         return None
 
-def get_youtube_trailer_link(movie_name, year):
-    search_query = f'{movie_name} {year} trailer'
-    video_search = VideosSearch(search_query, limit=1)
-    results = video_search.result()
-    most_viewed_video_url = results['result'][0]['link'] if results['result'] else None
-    return most_viewed_video_url
-
-async def search_torrents(ctx, movie_name, year, session):
-    query = f"{movie_name} x265 bluray 1080p 10bit {year}" if year else f"{movie_name} x265"
-    query = query.replace(' ', '+')
-    search_url = f'https://1337x.to/search/{query}/1/'
-    async with session.get(search_url) as response:
-        search_page = await response.text()
-    movie_matches = re.findall(r"torrent/[0-9]{7}/[a-zA-Z0-9?%-]*/", search_page)
-    hash_codes = []
-    sizes_in_gb = []
-    for movie_match in movie_matches[:5]:
-        movie_url = f"https://1337x.to/{movie_match}"
-        async with session.get(movie_url) as response:
-            movie_page = await response.text()
-        hash_match = re.search(r"<strong>Infohash :</strong> <span>([a-zA-Z0-9]*)</span>", movie_page)
-        size_match = re.search(r"\b\d+(\.\d+)?\sGB\b", movie_page)
-        if hash_match:
-            hash_codes.append(hash_match.group(1))
-        if size_match:
-            sizes_in_gb.append(size_match.group(0))
-    if not hash_codes:
-        await ctx.send(f"No hash codes found for {movie_name}")
-        return
-    embed = discord.Embed(title=f"Torrents for {movie_name}", color=discord.Color.blue())
-    for index, (hash_code, size_in_gb) in enumerate(zip(hash_codes, sizes_in_gb)):
-        hash_title = f"Hash {index + 1} - {size_in_gb}"
-        embed.add_field(name=hash_title, value=hash_code, inline=False)
-    await ctx.send(embed=embed)
+async def st(ctx, m, y, s):
+    try:
+        q = f"{m} x265 bluray 1080p 10bit {y}" if y else f"{m} x265"
+        q = q.replace(' ', '+')
+        su = f'https://1337x.to/search/{q}/1/'
+        async with s.get(su) as r:
+            sp = await r.text()
+        mm = re.findall(r"torrent/[0-9]{7}/[a-zA-Z0-9?%-]*/", sp)
+        hc = []
+        sg = []
+        for ma in mm[:5]:
+            mu = f"https://1337x.to/{ma}"
+            async with s.get(mu) as r:
+                mp = await r.text()
+            hm = re.search(r"<strong>Infohash :</strong> <span>([a-zA-Z0-9]*)</span>", mp)
+            sm = re.search(r"\b\d+(\.\d+)?\sGB\b", mp)
+            if hm:
+                hc.append(hm.group(1))
+            if sm:
+                sg.append(sm.group(0))
+        if not hc:
+            await ctx.send(f"No hash codes found for {m}")
+            return
+        embed = discord.Embed(title=f"Torrents for {m}", color=discord.Color.blue())
+        for i, (h, s) in enumerate(zip(hc, sg)):
+            ht = f"Hash {i + 1} - {s}"
+            embed.add_field(name=ht, value=h, inline=False)
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"An error occurred: {e}")
 
 intents = discord.Intents.default()
 intents.members = True
@@ -150,88 +137,84 @@ async def main():
 
     @bot.command()
     async def m(ctx, *, movie_name):
-        normalized_movie_name = normalize_text(movie_name)
-        url = "http://www.omdbapi.com/?apikey=[api]&t=" + normalized_movie_name.replace(' ', '+')
-        async with session.get(url) as response:
-            data = await response.json()
-        if data['Response'] == 'False':
-            await ctx.send(f"Movie {movie_name} not found.")
-            return
-        else:
-            year = None
-        if data['Response'] == 'True':
-            year = data['Year'].split('–')[0]
-        rotten_tomatoes_audience = await get_rotten_tomatoes_audience_score(normalized_movie_name, year=year, session=session)
-        metacritic_user = await get_metacritic_user_score(normalized_movie_name, year=year, session=session)
-        letterboxd_rating = await get_letterboxd_rating(normalized_movie_name, year=year, session=session)
-        plot = data['Plot']
-        my_email = 'your@email.com'
-        translator = Translator(to_lang="tr", from_lang="en", email=my_email)
-        translated_plot = translator.translate(plot)
-
-        title = data['Title']
-        year = data['Year'].split('-')[0]
-        genre = data['Genre']
-        director = data['Director']
-        actors = data['Actors']
-        imdb_rating = str(int(float(data['imdbRating']) * 10))
-        imdb_votes = data['imdbVotes']
-        rotten_tomatoes = 'N/A'
-        for rating in data['Ratings']:
-            if rating['Source'] == 'Rotten Tomatoes':
-                rotten_tomatoes = rating['Value'].replace('%', '')
-
-        metacritic = 'N/A'
-        for rating in data['Ratings']:
-            if rating['Source'] == 'Metacritic':
-                metacritic = rating['Value'].split('/')[0]
-
-        letterboxd_rating_out_of_100 = str(round(float(letterboxd_rating) * 10)) if letterboxd_rating != "N/A" else "N/A"
-        tspdt_rank = await get_tspdt_ranking(normalized_movie_name)
-        youtube_trailer_link = get_youtube_trailer_link(title, year)
-
-        scores = [
-            int(imdb_rating) if imdb_rating is not None else None,
-            int(rotten_tomatoes.split('/')[0]) if rotten_tomatoes != "N/A" and '/' in rotten_tomatoes else None,
-            int(rotten_tomatoes_audience) if rotten_tomatoes_audience is not None and rotten_tomatoes_audience != "N/A" else None,
-            int(metacritic) if metacritic is not None and metacritic != "N/A" else None,
-            int(letterboxd_rating_out_of_100) if letterboxd_rating_out_of_100 is not None and letterboxd_rating_out_of_100 != "N/A" else None,
-            int(metacritic_user) if metacritic_user is not None and metacritic_user != "N/A" else None
-        ]
-
-        valid_scores = [score for score in scores if score is not None]
-        average_score = round(sum(valid_scores) / len(valid_scores)) if valid_scores else "N/A"
-
-        embed = discord.Embed(title=title, url=youtube_trailer_link, description=translated_plot, color=discord.Color.blue())
-        embed.add_field(name="Year", value=year, inline=True)
-        embed.add_field(name="Genre", value=genre, inline=True)
-        embed.add_field(name="Director", value=director, inline=True)
-        embed.add_field(name="Actors", value=actors, inline=True)
-        embed.add_field(name="IMDB", value=imdb_rating, inline=True)
-        embed.add_field(name="IMDB Votes", value=imdb_votes, inline=True)
-        embed.add_field(name="Rotten", value=rotten_tomatoes, inline=True)
-        embed.add_field(name="Rotten Audience", value=rotten_tomatoes_audience, inline=True)
-        embed.add_field(name="Metacritic", value=metacritic, inline=True)
-        embed.add_field(name="Letterboxd", value=letterboxd_rating_out_of_100, inline=True)
-        embed.add_field(name="Metacritic User", value=metacritic_user, inline=True)
-        embed.add_field(name="Average Score", value=f"{average_score:.0f}" if average_score != "N/A" else "N/A", inline=True)
-        embed.add_field(name="Critic & Director Rank", value=tspdt_rank, inline=True)
-        embed.set_thumbnail(url=data['Poster'])
-
-        await ctx.send(embed=embed)
-        await ctx.message.delete()
+        try:
+            nmn = nt(movie_name)
+            url = "http://www.omdbapi.com/?apikey=98e54415&t=" + nmn.replace(' ', '+')
+            async with session.get(url) as r:
+                data = await r.json()
+            if data['Response'] == 'False':
+                await ctx.send(f"Movie {movie_name} not found.")
+                return
+            else:
+                year = None
+            if data['Response'] == 'True':
+                year = data['Year'].split('–')[0]
+            rta = await gras(nmn, y=year, s=session)
+            mu = await gmus(nmn, y=year, s=session)
+            lr = await glr(nmn, y=year, s=session)
+            plot = data['Plot']
+            title = data['Title']
+            year = data['Year'].split('-')[0]
+            genre = data['Genre']
+            director = data['Director']
+            actors = data['Actors']
+            imdb_rating = str(int(float(data['imdbRating']) * 10))
+            imdb_votes = data['imdbVotes']
+            rotten_tomatoes = 'N/A'
+            for rating in data['Ratings']:
+                if rating['Source'] == 'Rotten Tomatoes':
+                    rotten_tomatoes = rating['Value'].replace('%', '')
+            metacritic = 'N/A'
+            for rating in data['Ratings']:
+                if rating['Source'] == 'Metacritic':
+                    metacritic = rating['Value'].split('/')[0]
+            lro100 = str(round(float(lr) * 10)) if lr != "N/A" else "N/A"
+            tr = await gtr(nmn)
+            ytl = VS(f'{title} {year} trailer', limit=1).result()['result'][0]['link'] if VS(f'{title} {year} trailer', limit=1).result()['result'] else None
+            scores = [int(imdb_rating) if imdb_rating else None,
+                      int(rotten_tomatoes.split('/')[0]) if rotten_tomatoes != "N/A" and '/' in rotten_tomatoes else None,
+                      int(rta) if rta != "N/A" else None,
+                      int(metacritic) if metacritic != "N/A" else None,
+                      int(lro100) if lro100 != "N/A" else None,
+                      int(mu) if mu != "N/A" else None]
+            vs = [s for s in scores if s is not None]
+            avg = round(sum(vs) / len(vs)) if vs else "N/A"
+            embed = discord.Embed(title=title, url=ytl, description=plot, color=discord.Color.blue())
+            embed.add_field(name="Year", value=year, inline=True)
+            embed.add_field(name="Genre", value=genre, inline=True)
+            embed.add_field(name="Director", value=director, inline=True)
+            embed.add_field(name="Actors", value=actors, inline=True)
+            embed.add_field(name="IMDB", value=imdb_rating, inline=True)
+            embed.add_field(name="IMDB Votes", value=imdb_votes, inline=True)
+            embed.add_field(name="Rotten", value=rotten_tomatoes, inline=True)
+            embed.add_field(name="Rotten Audience", value=rta, inline=True)
+            embed.add_field(name="Metacritic", value=metacritic, inline=True)
+            embed.add_field(name="Letterboxd", value=lro100, inline=True)
+            embed.add_field(name="Metacritic User", value=mu, inline=True)
+            embed.add_field(name="Average Score", value=f"{avg:.0f}" if avg != "N/A" else "N/A", inline=True)
+            embed.add_field(name="Critic & Director Rank", value=tr, inline=True)
+            embed.set_thumbnail(url=data['Poster'])
+            await ctx.send(embed=embed)
+            await ctx.message.delete()
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
 
     @bot.command()
     async def t(ctx, *, movie_name):
-        normalized_movie_name = normalize_text(movie_name)
-        url = "http://www.omdbapi.com/?apikey=[api]&t=" + normalized_movie_name.replace(' ', '+')
-        async with session.get(url) as response:
-            data = await response.json()
-        if data['Response'] == 'True':
-            year = data['Year'].split('–')[0]
-        await search_torrents(ctx, movie_name=movie_name, year=year, session=session)
-        await ctx.message.delete()
+        try:
+            nmn = nt(movie_name)
+            url = "http://www.omdbapi.com/?apikey=APIKEY&t=" + nmn.replace(' ', '+')
+            async with session.get(url) as r:
+                data = await r.json()
+            year = None
+            if data['Response'] == 'True':
+                year = data['Year'].split('–')[0]
+            await st(ctx, m=movie_name, y=year, s=session)
+            await ctx.message.delete()
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
 
-    await bot.start('[token]')
+    await bot.start('APIKEY')
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
